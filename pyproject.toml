@@ -5,5 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "ebooklib>=0.20",
     "selectolax>=0.4.9",
 ]

@@ -1,66 +1,51 @@
 from pathlib import Path
-import zipfile
-from selectolax.parser import HTMLParser
+import html
+from src.archive_utils import extract_zip_archive
+from src.epub_builder import create_epub_from_html, create_epub_from_txt_files
+from src.html_processing import process_html_files, sanitize_title
 
 
-def main(input: str, output: str):
+def main(
+    input: str,
+    output: str,
+    title: str,
+    cover_page: str | None = None,
+):
     unzipped_path = extract_zip_archive(input, output)
     txt_path = process_html_files(output, unzipped_path)
-    # convert_to_epub(output, txt_path)
 
+    epub_output_dir = Path(output) / "epub"
+    epub_output_dir.mkdir(parents=True, exist_ok=True)
 
-def process_html_files(output, unzipped_path):
-    # go over everything on unzipped_path use selectolax to get first h1 as title clean it,
-    # then grab all p tags join by \n and save to output + title + .txt
-    # save txt to output / txt / title + .txt
-    output_txt_path = Path(output) / "txt"
-    for file in unzipped_path.glob("**/*.html"):
-        with open(file, "r", encoding="utf-8") as f:
-            html = f.read()
+    html_epub_path = epub_output_dir / f"{sanitize_title(title)} (HTML).epub"
+    txt_epub_path = epub_output_dir / f"{sanitize_title(title)} (TXT).epub"
 
-        parser = HTMLParser(html)
-        title = parser.css_first("h1").text().strip().lower()
-        # sanitize title by replacing spaces with underscores and removing special characters
-        title = sanitize_title(title)
-        title = title.replace("chapter chapter", "chapter")
-        content = "\n".join([p.text().strip() for p in parser.css("p")])
-        output_file = output_txt_path/ f"{title}.txt"
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(title + "\n\n" + content)
-        print(f"From {file} extracted title: {title} and saved to {output_file}")
+    epub_title = title or "Untitled"
 
-    print(f"total files on unzipped_path: {len(list(unzipped_path.glob('**/*.html')))}")
-    print(
-        f"total files on output/txt: {len(list((Path(output) / 'txt').glob('**/*.txt')))}"
-    )
-    return output_txt_path
+    html_content = f"""
+    <h1>{html.escape(epub_title)}</h1>
+    <p>This EPUB was generated from a direct HTML string.</p>
+    <p>You can replace this with any HTML you want.</p>
+    """
 
-
-def sanitize_title(title: str):
-    return (
-        title.replace("/", "_")
-        .replace("\\", "_")
-        .replace(":", "_")
-        .replace("*", "_")
-        .replace("?", "_")
-        .replace('"', "_")
-        .replace("<", "_")
-        .replace(">", "_")
-        .replace("|", "_")
+    create_epub_from_html(
+        title=f"{epub_title} (HTML)",
+        output_path=html_epub_path,
+        html_content=html_content,
+        cover_page=Path(cover_page) if cover_page else None,
     )
 
-
-def extract_zip_archive(input, output):
-    # unzip archive to output + "unzipped"
-    unzipped_path = Path(output) / "unzipped"
-    with zipfile.ZipFile(input, "r") as zip_ref:
-        zip_ref.extractall(unzipped_path)
-    return unzipped_path
+    create_epub_from_txt_files(
+        title=f"{epub_title} (TXT)",
+        output_path=txt_epub_path,
+        txt_dir=txt_path,
+        cover_page=Path(cover_page) if cover_page else None,
+    )
 
 
 if __name__ == "__main__":
     inp = Path("./inputs/archive.zip")
     out = Path("./outputs/Duke Pendragon")
+    cover_page = Path("./inputs/61fldt2XcwL._UF1000,1000_QL80_.jpg")
 
-    main(str(inp), str(out))
+    main(str(inp), str(out), title="Duke Pendragon", cover_page=str(cover_page))
