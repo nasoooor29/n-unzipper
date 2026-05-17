@@ -1,6 +1,7 @@
 ## n-unzipper
 
 Generate EPUBs from a zipped HTML archive and from extracted TXT files.
+also it will translate the books to another language using llms.
 
 ### Quick Run
 

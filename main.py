@@ -1,8 +1,14 @@
+import os
 from pathlib import Path
 import html
 from src.archive_utils import extract_zip_archive
 from src.epub_builder import create_epub_from_html, create_epub_from_txt_files
 from src.html_processing import process_html_files, sanitize_title
+
+# load env vars from dotenv import load_dotenv
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def main(
@@ -10,6 +16,7 @@ def main(
     output: str,
     title: str,
     cover_page: str | None = None,
+    translate_to: str | None = None,
 ):
     unzipped_path = extract_zip_archive(input, output)
     txt_path = process_html_files(output, unzipped_path)
