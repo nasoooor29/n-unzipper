@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import re
 from pathlib import Path
@@ -7,8 +6,14 @@ from typing import Any
 
 from openrouter import OpenRouter
 
-
 MODEL = "google/gemini-2.5-flash-lite"
+MAX_CHARACTER_SHEET_CHARS = 6000
+TRANSLATED_START = "<<<TRANSLATED_CHAPTER_START>>>"
+TRANSLATED_END = "<<<TRANSLATED_CHAPTER_END>>>"
+SHEET_START = "<<<UPDATED_CHARACTER_SHEET_START>>>"
+SHEET_END = "<<<UPDATED_CHARACTER_SHEET_END>>>"
+COMPACTED_SHEET_START = "<<<COMPACTED_CHARACTER_SHEET_START>>>"
+COMPACTED_SHEET_END = "<<<COMPACTED_CHARACTER_SHEET_END>>>"
 
 
 def _book_root_for(chapter_file: Path) -> Path:
@@ -17,17 +22,33 @@ def _book_root_for(chapter_file: Path) -> Path:
     return chapter_file.parent
 
 
-def _default_sheet_path(chapter_file: Path) -> Path:
-    return _book_root_for(chapter_file) / "characterSheet" / "character_sheet.txt"
+def _safe_path_part(value: str) -> str:
+    return re.sub(r"[^\w.-]+", "_", value.strip().lower()).strip("_") or "language"
 
 
-def _output_paths(chapter_file: Path, character_sheet_file: Path | None) -> tuple[Path, Path]:
+def _default_sheet_path(chapter_file: Path, target_language: str) -> Path:
+    return (
+        _book_root_for(chapter_file)
+        / "characterSheet"
+        / _safe_path_part(target_language)
+        / "character_sheet.md"
+    )
+
+
+def _output_paths(
+    chapter_file: Path, character_sheet_file: Path | None
+) -> tuple[Path, Path]:
     book_root = _book_root_for(chapter_file)
-    sheet_name = character_sheet_file.name if character_sheet_file else "character_sheet.txt"
     return (
         book_root / "translated" / chapter_file.name,
-        book_root / "characterSheet" / sheet_name,
+        character_sheet_file
+        if character_sheet_file
+        else book_root / "characterSheet" / "character_sheet.md",
     )
+
+
+def _failed_path(chapter_file: Path) -> Path:
+    return _book_root_for(chapter_file) / "failed_TL" / f"{chapter_file.stem}.md"
 
 
 def _split_title(chapter_text: str, chapter_file: Path) -> tuple[str, str]:
@@ -56,19 +77,44 @@ def _extract_response_text(response: Any) -> str:
     return response.choices[0].message.content or ""
 
 
-def _parse_translation_response(content: str) -> tuple[str, str]:
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError("OpenRouter response was not valid JSON.") from exc
+def _between(content: str, start: str, end: str) -> str:
+    start_index = content.find(start)
+    end_index = content.find(end)
+    if start_index == -1 or end_index == -1 or end_index <= start_index:
+        return ""
+    return content[start_index + len(start) : end_index].strip()
 
-    translated_chapter = str(data.get("translated_chapter", "")).strip()
-    updated_character_sheet = str(data.get("updated_character_sheet", "")).strip()
+
+def _parse_translation_response(content: str) -> tuple[str, str]:
+    translated_chapter = _between(content, TRANSLATED_START, TRANSLATED_END)
+    updated_character_sheet = _between(content, SHEET_START, SHEET_END)
     if not translated_chapter or not updated_character_sheet:
         raise ValueError(
-            "OpenRouter response must include translated_chapter and updated_character_sheet."
+            "OpenRouter response must include the required translation and sheet markers."
         )
     return translated_chapter, updated_character_sheet
+
+
+def _parse_compacted_sheet(content: str) -> str:
+    compacted = _between(content, COMPACTED_SHEET_START, COMPACTED_SHEET_END)
+    if not compacted:
+        raise ValueError("OpenRouter response must include the required compaction markers.")
+    return compacted.strip() + "\n"
+
+
+def _save_failed_translation(
+    chapter_file: Path, error: Exception, response_text: str | None
+) -> Path:
+    failed_path = _failed_path(chapter_file)
+    failed_path.parent.mkdir(parents=True, exist_ok=True)
+    failed_path.write_text(
+        f"# Failed Translation\n\n"
+        f"- Chapter: `{chapter_file.name}`\n"
+        f"- Error: `{type(error).__name__}: {error}`\n\n"
+        f"## Raw Response\n\n{response_text or '[no response]'}\n",
+        encoding="utf-8",
+    )
+    return failed_path
 
 
 def _preserve_original_title(translated_chapter: str, original_title: str) -> str:
@@ -105,12 +151,21 @@ Rules:
 - Preserve names, relationships, titles, locations, power systems, ranks, countries, factions, and story-specific terminology consistently.
 - Use the character/reference sheet to keep characters, relationships, titles, locations, terminology, power levels, and country/faction relations consistent.
 - Keep prose natural in {target_language}, but do not summarize or omit content.
-- Return valid JSON only. Do not wrap it in Markdown.
-- The JSON must contain exactly these string fields: translated_chapter, updated_character_sheet.
-- translated_chapter is message 1 and must contain the full translated chapter, starting with the unchanged original title.
-- updated_character_sheet is message 2 and must contain the updated reference sheet.
-- Keep the reference sheet easy to skim. Use clear bullet hierarchy. Use no more than 4 top-level sheets/categories when possible, and keep entries concise.
+- Return exactly two sections using these markers and no other text:
+  {TRANSLATED_START}
+  full translated chapter
+  {TRANSLATED_END}
+  {SHEET_START}
+  updated character/reference sheet
+  {SHEET_END}
+- The translated chapter section is message 1 and must contain the full translated chapter, starting with the unchanged original title.
+- The updated character/reference sheet section is message 2 and must contain the updated reference sheet.
+- updated_character_sheet must be Markdown written in {target_language}.
+- Keep the reference sheet easy to skim. Use clear Markdown bullet hierarchy. Use no more than 4 top-level sheets/categories when possible, and keep entries concise.
 - Organize people and concepts under their relevant kingdom, village, faction, family, power system, location, or category.
+- Do not add noisy one-off relation bullets like "Soldrake follows Raven" or "Isla fights beside Raven". Group repeated/simple relations under the main entry instead, for example: "- Companions: Soldrake, Isla".
+- Only add a separate nested bullet for a person, group, power, or relation when it has useful stable details beyond a simple follow/fight/travel relationship.
+- If an entry repeats in later chapters, merge new stable details into its existing entry instead of creating duplicate relation lines.
 """.strip()
 
     user_prompt = f"""
@@ -135,20 +190,80 @@ Chapter body to translate:
     ]
 
 
+def _build_compaction_messages(
+    target_language: str, character_sheet: str
+) -> list[dict[str, str]]:
+    system_prompt = f"""
+You compact novel translation reference sheets.
+
+Rules:
+- Return only the compacted Markdown sheet between these markers:
+  {COMPACTED_SHEET_START}
+  compacted Markdown sheet
+  {COMPACTED_SHEET_END}
+- Keep the sheet written in {target_language}.
+- Keep no more than 4 top-level categories when possible.
+- Preserve stable names, titles, locations, factions, power systems, terminology, and important relationships.
+- Remove minor, temporary, or obvious details.
+- Do not keep noisy one-off relation bullets like "X follows Y" or "X fights with Y".
+- Merge simple repeated relations into compact fields, for example: "- Companions: Soldrake, Isla".
+- Keep entries easy to skim and avoid duplicate people or duplicate relation lines.
+""".strip()
+
+    user_prompt = f"""
+Compact this character/reference sheet because it is getting too long:
+
+{character_sheet}
+""".strip()
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+async def _compact_character_sheet_async(
+    open_router: OpenRouter,
+    target_language: str,
+    character_sheet: str,
+    use_flex_service_tier: bool,
+) -> str:
+    if len(character_sheet) <= MAX_CHARACTER_SHEET_CHARS:
+        return character_sheet
+
+    response = await open_router.chat.send_async(
+        messages=_build_compaction_messages(target_language, character_sheet),
+        model=MODEL,
+        provider={"sort": "price"},
+        service_tier="flex" if use_flex_service_tier else None,
+        temperature=0.1,
+    )
+    print(f"compaction usage: {response.usage}")
+    return _parse_compacted_sheet(_extract_response_text(response))
+
+
 async def translate_chapter_async(
     chapter_file: str | Path,
     target_language: str,
     character_sheet_file: str | Path | None = None,
+    use_flex_service_tier: bool = True,
+    max_retries: int = 3,
 ) -> tuple[str, str]:
     chapter_path = Path(chapter_file)
-    sheet_path = Path(character_sheet_file) if character_sheet_file else _default_sheet_path(chapter_path)
+    sheet_path = (
+        Path(character_sheet_file)
+        if character_sheet_file
+        else _default_sheet_path(chapter_path, target_language)
+    )
     translated_path, updated_sheet_path = _output_paths(chapter_path, sheet_path)
 
     if translated_path.exists():
         print(f"Skipping already translated chapter: {translated_path}")
         translated = translated_path.read_text(encoding="utf-8")
         sheet_source = updated_sheet_path if updated_sheet_path.exists() else sheet_path
-        sheet = sheet_source.read_text(encoding="utf-8") if sheet_source.exists() else ""
+        sheet = (
+            sheet_source.read_text(encoding="utf-8") if sheet_source.exists() else ""
+        )
         return translated, sheet
 
     api_key = os.getenv("OPENROUTER_API_KEY", "")
@@ -156,27 +271,55 @@ async def translate_chapter_async(
         raise RuntimeError("OPENROUTER_API_KEY is not set.")
 
     chapter_text = chapter_path.read_text(encoding="utf-8")
-    character_sheet = sheet_path.read_text(encoding="utf-8") if sheet_path.exists() else ""
+    character_sheet = (
+        sheet_path.read_text(encoding="utf-8") if sheet_path.exists() else ""
+    )
     chapter_title, chapter_body = _split_title(chapter_text, chapter_path)
 
+    response_text = None
+    last_error: Exception | None = None
     async with OpenRouter(api_key=api_key) as open_router:
-        response = await open_router.chat.send_async(
-            messages=_build_messages(
-                chapter_path,
-                target_language,
-                character_sheet,
-                chapter_title,
-                chapter_body,
-            ),
-            model=MODEL,
-            provider={"sort": "price"},
-            response_format={"type": "json_object"},
-            temperature=0.2,
-        )
+        try:
+            character_sheet = await _compact_character_sheet_async(
+                open_router, target_language, character_sheet, use_flex_service_tier
+            )
+            if character_sheet.strip():
+                updated_sheet_path.parent.mkdir(parents=True, exist_ok=True)
+                updated_sheet_path.write_text(character_sheet, encoding="utf-8")
+        except Exception as exc:
+            print(f"Character sheet compaction failed; using existing sheet: {exc}")
 
-    translated_chapter, updated_character_sheet = _parse_translation_response(
-        _extract_response_text(response)
-    )
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await open_router.chat.send_async(
+                    messages=_build_messages(
+                        chapter_path,
+                        target_language,
+                        character_sheet,
+                        chapter_title,
+                        chapter_body,
+                    ),
+                    model=MODEL,
+                    provider={"sort": "price"},
+                    service_tier="flex" if use_flex_service_tier else None,
+                    temperature=0.2,
+                )
+                print(f"usage: {response.usage}")
+                response_text = _extract_response_text(response)
+                translated_chapter, updated_character_sheet = _parse_translation_response(
+                    response_text
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                print(
+                    f"Translation attempt {attempt}/{max_retries} failed for {chapter_path.name}: {exc}"
+                )
+        else:
+            error = last_error or RuntimeError("translation failed")
+            failed_path = _save_failed_translation(chapter_path, error, response_text)
+            raise RuntimeError(f"Saved failed translation to {failed_path}") from error
+
     translated_chapter = _preserve_original_title(translated_chapter, chapter_title)
     updated_character_sheet = updated_character_sheet.strip() + "\n"
 
@@ -194,9 +337,17 @@ def translate_chapter(
     chapter_file: str | Path,
     target_language: str,
     character_sheet_file: str | Path | None = None,
+    use_flex_service_tier: bool = True,
+    max_retries: int = 3,
 ) -> tuple[str, str]:
     return asyncio.run(
-        translate_chapter_async(chapter_file, target_language, character_sheet_file)
+        translate_chapter_async(
+            chapter_file,
+            target_language,
+            character_sheet_file,
+            use_flex_service_tier,
+            max_retries,
+        )
     )
 
 
@@ -204,8 +355,16 @@ def main(
     chapter_file: str | Path,
     target_language: str,
     character_sheet_file: str | Path | None = None,
+    use_flex_service_tier: bool = True,
+    max_retries: int = 3,
 ) -> tuple[str, str]:
-    return translate_chapter(chapter_file, target_language, character_sheet_file)
+    return translate_chapter(
+        chapter_file,
+        target_language,
+        character_sheet_file,
+        use_flex_service_tier,
+        max_retries,
+    )
 
 
 async def translate_chapters_async(
@@ -214,18 +373,29 @@ async def translate_chapters_async(
     character_sheet_file: str | Path | None = None,
     start: int | None = None,
     end: int | None = None,
+    use_flex_service_tier: bool = True,
+    max_retries: int = 3,
 ) -> None:
     chapter_files = _chapter_slice(
         sorted(Path(chapter_dir).glob("*.txt"), key=_natural_sort_key), start, end
     )
     for chapter_file in chapter_files:
-        _, updated_sheet = await translate_chapter_async(
-            chapter_file, target_language, character_sheet_file
+        try:
+            _, updated_sheet = await translate_chapter_async(
+                chapter_file,
+                target_language,
+                character_sheet_file,
+                use_flex_service_tier,
+                max_retries,
+            )
+        except Exception as exc:
+            print(f"Skipping failed chapter {chapter_file.name}: {exc}")
+            continue
+        character_sheet_file = (
+            Path(character_sheet_file)
+            if character_sheet_file
+            else _default_sheet_path(chapter_file, target_language)
         )
-        character_sheet_file = _output_paths(
-            chapter_file,
-            Path(character_sheet_file) if character_sheet_file else None,
-        )[1]
         Path(character_sheet_file).write_text(updated_sheet, encoding="utf-8")
 
 
@@ -235,6 +405,8 @@ def translate_chapters(
     character_sheet_file: str | Path | None = None,
     start: int | None = None,
     end: int | None = None,
+    use_flex_service_tier: bool = True,
+    max_retries: int = 3,
 ) -> None:
     asyncio.run(
         translate_chapters_async(
@@ -243,5 +415,7 @@ def translate_chapters(
             character_sheet_file,
             start=start,
             end=end,
+            use_flex_service_tier=use_flex_service_tier,
+            max_retries=max_retries,
         )
     )
