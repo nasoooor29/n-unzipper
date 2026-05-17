@@ -7,5 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "dotenv>=0.9.9",
     "ebooklib>=0.20",
+    "openrouter>=0.9.1",
     "selectolax>=0.4.9",
 ]
