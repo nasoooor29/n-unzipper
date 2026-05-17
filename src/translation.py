@@ -7,7 +7,8 @@ from typing import Any
 from openrouter import OpenRouter
 
 MODEL = "google/gemini-2.5-flash-lite"
-MAX_CHARACTER_SHEET_CHARS = 6000
+MAX_CHARACTER_SHEET_CHARS = 5000
+# TARGET_CHARACTER_SHEET_CHARS = 5000
 TRANSLATED_START = "<<<TRANSLATED_CHAPTER_START>>>"
 TRANSLATED_END = "<<<TRANSLATED_CHAPTER_END>>>"
 SHEET_START = "<<<UPDATED_CHARACTER_SHEET_START>>>"
@@ -31,6 +32,15 @@ def _default_sheet_path(chapter_file: Path, target_language: str) -> Path:
         _book_root_for(chapter_file)
         / "characterSheet"
         / _safe_path_part(target_language)
+        / "character_sheet.yaml"
+    )
+
+
+def _legacy_default_sheet_path(chapter_file: Path, target_language: str) -> Path:
+    return (
+        _book_root_for(chapter_file)
+        / "characterSheet"
+        / _safe_path_part(target_language)
         / "character_sheet.md"
     )
 
@@ -43,7 +53,7 @@ def _output_paths(
         book_root / "translated" / chapter_file.name,
         character_sheet_file
         if character_sheet_file
-        else book_root / "characterSheet" / "character_sheet.md",
+        else book_root / "characterSheet" / "character_sheet.yaml",
     )
 
 
@@ -137,9 +147,9 @@ def _build_messages(
         "Use the provided character/reference sheet as the source of truth. Update it "
         "only with important new or changed information from this chapter."
         if character_sheet.strip()
-        else "The character/reference sheet is empty. Create a compact sheet containing "
-        "the most important recurring characters, groups, locations, relationships, "
-        "power levels, countries, factions, titles, and story-specific terms from this chapter."
+        else "The character/reference sheet is empty. Create a compact YAML master "
+        "glossary containing only important character names, country/location names, "
+        "power levels, factions, titles, and special story-specific terms from this chapter."
     )
 
     system_prompt = f"""
@@ -148,8 +158,8 @@ Translate the chapter into {target_language} while preserving story continuity.
 
 Rules:
 - Preserve the first line/chapter title exactly as provided. Do not translate, rewrite, or reformat it.
-- Preserve names, relationships, titles, locations, power systems, ranks, countries, factions, and story-specific terminology consistently.
-- Use the character/reference sheet to keep characters, relationships, titles, locations, terminology, power levels, and country/faction relations consistent.
+- Preserve names, relationships, titles, locations, power systems, ranks, countries, factions, and story-specific terminology consistently in the translated chapter.
+- Use the character/reference sheet only as a glossary for names, titles, locations, power levels, countries, factions, and special terminology.
 - Keep prose natural in {target_language}, but do not summarize or omit content.
 - Return exactly two sections using these markers and no other text:
   {TRANSLATED_START}
@@ -160,14 +170,24 @@ Rules:
   {SHEET_END}
 - The translated chapter section is message 1 and must contain the full translated chapter, starting with the unchanged original title.
 - The updated character/reference sheet section is message 2 and must contain the updated reference sheet.
-- updated_character_sheet must be Markdown written in {target_language}.
-- Keep the reference sheet easy to skim. Use clear Markdown bullet hierarchy. Use no more than 4 top-level sheets/categories when possible, and keep entries concise.
-- Organize people and concepts under their relevant kingdom, village, faction, family, power system, location, or category.
-- Do not add noisy one-off relation bullets like "Soldrake follows Raven" or "Isla fights beside Raven". Group repeated/simple relations under the main entry instead, for example: "- Companions: Soldrake, Isla".
-- Only add a separate nested bullet for a person, group, power, or relation when it has useful stable details beyond a simple follow/fight/travel relationship.
-- If an entry repeats in later chapters, merge new stable details into its existing entry instead of creating duplicate relation lines.
+- updated_character_sheet must be short YAML, not Markdown prose.
+- The YAML is only for translation consistency. Sacrifice details to keep it short.
+- Use this structure when relevant:
+  characters:
+    after translation name: original name
+  countries:
+    after translation name: original name
+  power_levels:
+    after translation name: original name
+  special_words:
+    after translation name: original name
+- Only add special story-specific terms. Do not add common words that have ordinary dictionary translations.
+- Do not add who follows who, who fights who, temporary travel groups, scene events, personality notes, or chapter summaries.
+- Do not add roles, notes, relationships, or details unless they are part of a fixed title/name/term needed for consistent translation.
+- Keep existing original names stable. If a name/term already exists, reuse it instead of adding a duplicate.
 """.strip()
 
+# - Keep the entire YAML easy to skim and preferably under {TARGET_CHARACTER_SHEET_CHARS} characters.
     user_prompt = f"""
 {sheet_instruction}
 
@@ -194,24 +214,26 @@ def _build_compaction_messages(
     target_language: str, character_sheet: str
 ) -> list[dict[str, str]]:
     system_prompt = f"""
-You compact novel translation reference sheets.
+You compact novel translation YAML glossaries.
 
 Rules:
-- Return only the compacted Markdown sheet between these markers:
+- Return only the compacted YAML sheet between these markers:
   {COMPACTED_SHEET_START}
-  compacted Markdown sheet
+  compacted YAML sheet
   {COMPACTED_SHEET_END}
-- Keep the sheet written in {target_language}.
-- Keep no more than 4 top-level categories when possible.
-- Preserve stable names, titles, locations, factions, power systems, terminology, and important relationships.
-- Remove minor, temporary, or obvious details.
-- Do not keep noisy one-off relation bullets like "X follows Y" or "X fights with Y".
-- Merge simple repeated relations into compact fields, for example: "- Companions: Soldrake, Isla".
-- Keep entries easy to skim and avoid duplicate people or duplicate relation lines.
+- Keep only translation-consistency glossary entries, not story notes.
+- Use only these top-level categories when relevant: characters, countries, power_levels, special_words.
+- Each entry should be a mapping from translated_name to original name.
+- Preserve important stable names, titles, locations, factions, power levels, and special terminology.
+- Remove common words, minor details, temporary relationships, who follows who, who fights who, scene events, personality notes, and summaries.
+- Remove duplicates and merge equivalent entries.
+- Prefer sacrificing details over making the sheet long.
 """.strip()
 
+# - Keep the compacted YAML under {TARGET_CHARACTER_SHEET_CHARS} characters when possible.
+
     user_prompt = f"""
-Compact this character/reference sheet because it is getting too long:
+Compact this YAML glossary because it is getting too long:
 
 {character_sheet}
 """.strip()
@@ -271,9 +293,13 @@ async def translate_chapter_async(
         raise RuntimeError("OPENROUTER_API_KEY is not set.")
 
     chapter_text = chapter_path.read_text(encoding="utf-8")
-    character_sheet = (
-        sheet_path.read_text(encoding="utf-8") if sheet_path.exists() else ""
-    )
+    legacy_sheet_path = _legacy_default_sheet_path(chapter_path, target_language)
+    if sheet_path.exists():
+        character_sheet = sheet_path.read_text(encoding="utf-8")
+    elif not character_sheet_file and legacy_sheet_path.exists():
+        character_sheet = legacy_sheet_path.read_text(encoding="utf-8")
+    else:
+        character_sheet = ""
     chapter_title, chapter_body = _split_title(chapter_text, chapter_path)
 
     response_text = None
