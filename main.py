@@ -4,6 +4,7 @@ import html
 from src.archive_utils import extract_zip_archive
 from src.epub_builder import create_epub_from_html, create_epub_from_txt_files
 from src.html_processing import process_html_files, sanitize_title
+from src.translation import translate_chapters
 
 # load env vars from dotenv import load_dotenv
 from dotenv import load_dotenv
@@ -17,6 +18,8 @@ def main(
     title: str,
     cover_page: str | None = None,
     translate_to: str | None = None,
+    translate_start: int | None = None,
+    translate_end: int | None = None,
 ):
     unzipped_path = extract_zip_archive(input, output)
     txt_path = process_html_files(output, unzipped_path)
@@ -49,10 +52,26 @@ def main(
         cover_page=Path(cover_page) if cover_page else None,
     )
 
+    if translate_to:
+        translate_chapters(
+            "./outputs/Duke Pendragon/txt",
+            translate_to,
+            start=translate_start,
+            end=translate_end,
+        )
+
 
 if __name__ == "__main__":
     inp = Path("./inputs/archive.zip")
     out = Path("./outputs/Duke Pendragon")
     cover_page = Path("./inputs/61fldt2XcwL._UF1000,1000_QL80_.jpg")
 
-    main(str(inp), str(out), title="Duke Pendragon", cover_page=str(cover_page))
+    main(
+        str(inp),
+        str(out),
+        title="Duke Pendragon",
+        cover_page=str(cover_page),
+        translate_to="arabic",
+        translate_start=75,
+        translate_end=80,
+    )
