@@ -66,14 +66,15 @@ def main(
 
 
 if __name__ == "__main__":
+    title = "Duke Pendragon"
     inp = Path("./inputs/archive.zip")
-    out = Path("./outputs/Duke Pendragon")
+    out = Path(f"./outputs/{title}")
     cover_page = Path("./inputs/61fldt2XcwL._UF1000,1000_QL80_.jpg")
 
     main(
         str(inp),
         str(out),
-        title="Duke Pendragon",
+        title=title,
         cover_page=str(cover_page),
         translate_to="arabic",
         translate_start=75,
